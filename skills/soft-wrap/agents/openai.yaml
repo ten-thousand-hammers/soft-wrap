@@ -1,0 +1,4 @@
+interface:
+  display_name: "Soft Wrap"
+  short_description: "Keep prose sentences on one physical line"
+  default_prompt: "Use $soft-wrap to remove hard line breaks from prose in this project."
