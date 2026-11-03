@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import functools
 import os
 import re
 import sys
@@ -169,6 +170,8 @@ DEFAULT_EXCLUDED_NAMES = (
     "*-ofl.txt",
 )
 
+IGNORE_FILE = ".soft-wrap-ignore"
+
 IGNORED_DIRECTORIES = {
     ".git",
     ".hg",
@@ -192,6 +195,7 @@ IGNORED_DIRECTORIES = {
 }
 
 SENTENCE_END = re.compile(r"[.!?:](?:[)\]}'\"`*_~])*$")
+CODE_SPAN = re.compile(r"`[^`\n]*`")
 COLON_END = re.compile(r":(?:[)\]}'\"`*_~])*$")
 FULL_STOP_END = re.compile(r"[.!?](?:[)\]}'\"`*_~])*$")
 ABBREVIATION_END = re.compile(
@@ -369,6 +373,11 @@ def ends_sentence(text: str) -> bool:
     return bool(SENTENCE_END.search(text)) and not bool(ABBREVIATION_END.search(text))
 
 
+def without_code_spans(text: str) -> str:
+    """Replace each code span with a placeholder, so `over?` doesn't end a sentence but `reset!`. still does."""
+    return CODE_SPAN.sub("`code`", text)
+
+
 def continuation_certainty(text: str, strict: bool) -> bool | None:
     if SAFE_CONTINUATION.search(text):
         return True
@@ -382,11 +391,12 @@ def break_certainty(previous: str, current: str, strict: bool) -> bool | None:
     if HYPHEN_SPLIT.search(previous):
         return None
     certainty = continuation_certainty(current, strict)
-    if COLON_END.search(previous):
+    ending = without_code_spans(previous)
+    if COLON_END.search(ending):
         # After a colon, join only a line that finishes the sentence, so an example such as "echo hello" stays on its own line; --fix repeats, so a longer continuation joins up from its last line.
-        if not (certainty and FULL_STOP_END.search(current)):
+        if not (certainty and FULL_STOP_END.search(without_code_spans(current))):
             return None
-    elif ends_sentence(previous):
+    elif ends_sentence(ending):
         return None
     if certainty is False and COMMAND_OR_URL_END.search(previous):
         return None
@@ -622,14 +632,14 @@ def apply_safe_fixes(
     mode: str,
     comment_families: frozenset[str] | None = None,
     config_keys: bool = False,
+    strict: bool = False,
 ) -> tuple[str, int]:
+    """Join SW001 breaks, and SW002 breaks too when strict; a soft-wrap: ignore-next-line comment protects a false positive."""
     fixed = 0
     while True:
         lines = split_physical_lines(text)
-        violations = find_violations(
-            lines, mode, comment_families=comment_families, config_keys=config_keys
-        )
-        safe = [violation for violation in violations if violation.certain]
+        violations = find_violations(lines, mode, strict, comment_families, config_keys)
+        safe = [violation for violation in violations if strict or violation.certain]
         if not safe:
             return text, fixed
         for violation in reversed(safe):
@@ -727,16 +737,55 @@ def license_name(path: Path) -> bool:
     return any(fnmatch.fnmatch(name, pattern) for pattern in DEFAULT_EXCLUDED_NAMES)
 
 
+def project_root(path: Path) -> Path | None:
+    absolute = path.resolve()
+    for directory in (absolute, *absolute.parents):
+        if (directory / ".git").exists():
+            return directory
+    return None
+
+
 def project_directories(path: Path) -> tuple[str, ...]:
     """The directories between the project root and path, so a checkout under /tmp or build/ isn't mistaken for one."""
     relative = relative_path(path)
     if not relative.is_absolute():
         return relative.parts[:-1]
-    absolute = path.resolve()
-    for root in absolute.parents:
-        if (root / ".git").exists():
-            return absolute.relative_to(root).parts[:-1]
-    return ()
+    root = project_root(path)
+    if root is None:
+        return ()
+    return path.resolve().relative_to(root).parts[:-1]
+
+
+@functools.lru_cache(maxsize=None)
+def ignore_file_patterns(root: Path) -> tuple[str, ...]:
+    """Globs from the project's .soft-wrap-ignore, one per line; # starts a comment and a trailing / matches a directory's contents."""
+    try:
+        lines = (root / IGNORE_FILE).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return ()
+    patterns = (line.strip() for line in lines)
+    return tuple(
+        f"{pattern}*" if pattern.endswith("/") else pattern
+        for pattern in patterns
+        if pattern and not pattern.startswith("#")
+    )
+
+
+def ignored_by_project(path: Path) -> bool:
+    """Whether the .soft-wrap-ignore at the project root (the nearest .git, else the working directory) lists path."""
+    root = project_root(path)
+    if root is None:
+        root = Path.cwd().resolve()
+    try:
+        relative = path.resolve().relative_to(root).as_posix()
+    except ValueError:
+        return False
+    if path.is_dir():
+        relative += "/"
+    return any(
+        fnmatch.fnmatch(relative, pattern) or fnmatch.fnmatch(path.name, pattern)
+        for pattern in ignore_file_patterns(root)
+    )
 
 
 def excluded_by_default(path: Path) -> bool:
@@ -760,10 +809,13 @@ def walk_directory(
             for name in directories
             if name.lower() not in IGNORED_DIRECTORIES
             and not excluded(Path(root) / name, patterns)
+            and not ignored_by_project(Path(root) / name)
         )
         for filename in sorted(filenames):
             path = Path(root) / filename
             if excluded(path, patterns) or (default_excludes and license_name(path)):
+                continue
+            if ignored_by_project(path):
                 continue
             if infer_mode(path) is not None:
                 yield path
@@ -786,7 +838,7 @@ def collect_files(
         candidates: Iterable[Path]
         if path.is_dir():
             candidates = walk_directory(path, patterns, default_excludes)
-        elif excluded(path, patterns):
+        elif excluded(path, patterns) or ignored_by_project(path):
             continue
         elif default_excludes and excluded_by_default(path):
             continue
@@ -840,7 +892,7 @@ def check_file(
     config_keys = path.suffix.lower() in YAML_SUFFIXES
     fixed = 0
     if fix:
-        updated, fixed = apply_safe_fixes(text, mode, families, config_keys)
+        updated, fixed = apply_safe_fixes(text, mode, families, config_keys, strict)
         if updated != text:
             try:
                 path.write_bytes(updated.encode("utf-8"))
@@ -866,7 +918,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fix",
         action="store_true",
-        help="join high-confidence continuations in place",
+        help="join high-confidence continuations in place; with --strict, join lower-confidence ones too",
     )
     parser.add_argument(
         "--strict",
@@ -884,7 +936,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="GLOB",
-        help="exclude a path or basename glob; repeat as needed",
+        help="exclude a path or basename glob; repeat as needed (a project can also list globs in .soft-wrap-ignore)",
     )
     parser.add_argument(
         "--no-default-excludes",

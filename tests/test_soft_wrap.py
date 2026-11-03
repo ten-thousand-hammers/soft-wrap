@@ -86,6 +86,27 @@ continued after the break.
         self.assertEqual(0, count)
         self.assertEqual(source, corrected)
 
+    def test_strict_fix_applies_capitalized_continuations(self):
+        source = "Send this request to the\nOpenAI API before continuing.\n"
+
+        corrected, count = SOFT_WRAP.apply_safe_fixes(source, "prose", strict=True)
+
+        self.assertEqual(1, count)
+        self.assertEqual("Send this request to the OpenAI API before continuing.\n", corrected)
+
+    def test_punctuation_inside_a_code_span_does_not_end_the_sentence(self):
+        source = "- Spans and clocks with `over?`\n  and `done?`, status, and the rest.\n"
+
+        corrected, count = SOFT_WRAP.apply_safe_fixes(source, "prose")
+
+        self.assertEqual(1, count)
+        self.assertEqual("- Spans and clocks with `over?` and `done?`, status, and the rest.\n", corrected)
+
+    def test_punctuation_after_a_code_span_still_ends_the_sentence(self):
+        source = "Call `reset!`.\nthen the next step starts.\n"
+
+        self.assertEqual([], SOFT_WRAP.analyze_text(source, "prose", strict=True))
+
     def test_skips_indented_literal_blocks(self):
         source = "    code that looks like\n    wrapped prose to a heuristic\n"
 
@@ -389,6 +410,47 @@ class FileCollectionTest(unittest.TestCase):
             self.assertEqual([], explicit_errors + scan_errors)
             self.assertEqual([(readme, "prose")], explicit)
             self.assertEqual([(readme, "prose")], scanned)
+
+    def test_check_file_fixes_strict_findings_when_asked(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "notes.md"
+            path.write_text("Send this request to the\nOpenAI API before continuing.\n", encoding="utf-8")
+
+            findings, fixed, error = SOFT_WRAP.check_file(path, "prose", True, True)
+
+            self.assertEqual((0, 1, None), (findings, fixed, error))
+            self.assertEqual(
+                "Send this request to the OpenAI API before continuing.\n",
+                path.read_text(encoding="utf-8"),
+            )
+
+    def test_ignore_file_at_the_project_root_excludes_paths(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / ".git").mkdir()
+            (root / ".soft-wrap-ignore").write_text(
+                "# Written by git-cliff\nCHANGELOG.md\n\ndocs/generated/\n", encoding="utf-8"
+            )
+            generated_docs = root / "docs" / "generated"
+            generated_docs.mkdir(parents=True)
+            names = [
+                root / "CHANGELOG.md",
+                generated_docs / "api.md",
+                root / "docs" / "guide.md",
+                root / "README.md",
+            ]
+            for path in names:
+                path.write_text("A wrapped\nsentence.\n", encoding="utf-8")
+
+            scanned, scan_errors = SOFT_WRAP.collect_files([str(root)], "auto", [])
+            explicit, explicit_errors = SOFT_WRAP.collect_files(
+                [str(path) for path in names], "auto", []
+            )
+
+            self.assertEqual([], scan_errors + explicit_errors)
+            expected = [root / "README.md", root / "docs" / "guide.md"]
+            self.assertEqual(expected, [path for path, _mode in scanned])
+            self.assertEqual(sorted(expected), sorted(path for path, _mode in explicit))
 
     def test_check_file_leaves_generated_files_alone(self):
         headers = [
