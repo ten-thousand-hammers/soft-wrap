@@ -142,6 +142,33 @@ SOURCE_NAMES = {
     "vagrantfile",
 }
 
+YAML_SUFFIXES = {".yaml", ".yml"}
+
+HASH_INTERPRETERS = {
+    "bash",
+    "dash",
+    "fish",
+    "ksh",
+    "perl",
+    "python",
+    "rake",
+    "ruby",
+    "sh",
+    "zsh",
+}
+SLASH_INTERPRETERS = {"bun", "deno", "node", "tsx"}
+
+DEFAULT_EXCLUDED_NAMES = (
+    "copying",
+    "copying.*",
+    "licence",
+    "licence.*",
+    "license",
+    "license.*",
+    "ofl.txt",
+    "*-ofl.txt",
+)
+
 IGNORED_DIRECTORIES = {
     ".git",
     ".hg",
@@ -165,6 +192,7 @@ IGNORED_DIRECTORIES = {
 }
 
 SENTENCE_END = re.compile(r"[.!?:](?:[)\]}'\"`*_~])*$")
+COLON_END = re.compile(r":(?:[)\]}'\"`*_~])*$")
 ABBREVIATION_END = re.compile(
     r"\b(?:approx|cf|Dr|e\.g|etc|i\.e|Mr|Mrs|Ms|No|resp|vs)\.$"
 )
@@ -177,10 +205,29 @@ GENERATED_BLOCK = re.compile(
     r"^(?:== Schema Information|Foreign Keys|Indexes|Table name:)"
 )
 SKIP_LINE = re.compile(
-    r"^(?:#!|-\*-|=begin|=end|encoding:|frozen_string_literal|HACK|NOTE|OPTIMIZE|REVIEW|rubocop:|standard:|TODO|FIXME)"
+    r"^(?:#!|!/|-\*-|=begin|=end|encoding:|frozen_string_literal|HACK|NOTE|OPTIMIZE|REVIEW|rubocop:|standard:|TODO|FIXME)"
 )
 COMMENT_MARKUP = re.compile(r"^(?:[-*+]\s|\d+[.)]\s|[|>]|```|~~~)")
 CODE_LIKE = re.compile(r"[{}]|=>")
+TEMPLATE_TAG = re.compile(r"<%|\{\{")
+COMMAND_START = r"(?:\$\s+|\.{1,2}/|~/|(?:bin|exe|sbin|script)/)"
+COMMAND_LIKE = re.compile(
+    rf"^(?:{COMMAND_START}|[\w.-]+(?:\s+[\w.:-]+)?\s+--?[A-Za-z])"
+)
+LITERAL_ARGUMENT = r"(?:\"[^\"]*\"|'[^']*'|:\w+|\w+:\s*\S+)"
+CALL_WITH_LITERAL = re.compile(
+    rf"^[a-z_]\w*[!?]?\s+{LITERAL_ARGUMENT}(?:\s*,\s*{LITERAL_ARGUMENT})*$"
+)
+CONFIG_KEY = re.compile(r"^[a-z_][\w.-]*:(?:\s|$)")
+COMMENT_LIST_ITEM = re.compile(r"^(?:[-*+]|\d+[.)])[ \t]+")
+LICENSE_BLOCK = re.compile(r"@(?:license|preserve)\b")
+COMMAND_OR_URL_END = re.compile(rf"(?:\w+://\S*[\w/]|:\s+{COMMAND_START}.*)$")
+IGNORE_NEXT_LINE = re.compile(r"\bsoft-wrap:\s*ignore-next-line\b")
+GENERATED_HEADER = re.compile(
+    r"@generated\b|\bDO NOT EDIT\b|\bThis file (?:is|was|has been) (?:auto-?)?generated\b",
+    re.IGNORECASE,
+)
+GENERATED_HEADER_LINES = 10
 CODE_STATEMENT = re.compile(
     r"^(?:(?:begin|else|end|ensure|private|protected|public|rescue)\b|"
     r"(?:attr_accessor|attr_reader|attr_writer|class|def|extend|include|module|require|require_relative)\s|"
@@ -329,23 +376,60 @@ def continuation_certainty(text: str, strict: bool) -> bool | None:
     return None
 
 
-def skip_comment_text(text: str) -> bool:
+def break_certainty(previous: str, current: str, strict: bool) -> bool | None:
+    """Return whether the break between two lines splits a sentence, or None if it does not."""
+    if HYPHEN_SPLIT.search(previous):
+        return None
+    certainty = continuation_certainty(current, strict)
+    if ends_sentence(previous) and not (COLON_END.search(previous) and certainty):
+        return None
+    if certainty is False and COMMAND_OR_URL_END.search(previous):
+        return None
+    return certainty
+
+
+def skip_comment_text(text: str, config_keys: bool = False) -> bool:
     return bool(
         SKIP_LINE.search(text)
         or COMMENT_MARKUP.search(text)
         or TABULAR.search(text)
         or CODE_LIKE.search(text)
+        or TEMPLATE_TAG.search(text)
+        or COMMAND_LIKE.search(text)
+        or CALL_WITH_LITERAL.search(text)
+        or (config_keys and CONFIG_KEY.search(text))
     )
+
+
+def list_item_continues(previous: CommentLine, current: CommentLine) -> bool:
+    """Whether current is indented to the text of the list item on the previous line."""
+    item = COMMENT_LIST_ITEM.match(previous.text)
+    if not item:
+        return False
+    item_text = previous.text[item.end() :]
+    if skip_comment_text(item_text):
+        return False
+    text_column = len(previous.gap.expandtabs(4)) + len(item.group().expandtabs(4))
+    return len(current.gap.expandtabs(4)) == text_column
+
+
+def license_block(block: Sequence[CommentLine]) -> bool:
+    if marker_family(block[0].marker) == "/*" and block[0].text.startswith("!"):
+        return True
+    return any(LICENSE_BLOCK.search(line.text) for line in block)
 
 
 def find_comment_violations(
     lines: Sequence[PhysicalLine],
     strict: bool = False,
     families: frozenset[str] | None = None,
+    config_keys: bool = False,
 ) -> list[Violation]:
     violations: list[Violation] = []
     for block in comment_blocks(lines, families):
         texts = [line.text for line in block]
+        if license_block(block):
+            continue
         if any(GENERATED_BLOCK.search(text) for text in texts):
             continue
         if any(CODE_STATEMENT.search(text) for text in texts):
@@ -355,13 +439,12 @@ def find_comment_violations(
         for previous, current in zip(block, block[1:]):
             if not previous.text or not current.text:
                 continue
-            if skip_comment_text(previous.text) or skip_comment_text(current.text):
+            if skip_comment_text(current.text, config_keys):
                 continue
-            if previous.gap != current.gap:
-                continue
-            if HYPHEN_SPLIT.search(previous.text) or ends_sentence(previous.text):
-                continue
-            certainty = continuation_certainty(current.text, strict)
+            if not list_item_continues(previous, current):
+                if skip_comment_text(previous.text, config_keys) or previous.gap != current.gap:
+                    continue
+            certainty = break_certainty(previous.text, current.text, strict)
             if certainty is None:
                 continue
             violations.append(
@@ -480,9 +563,7 @@ def find_prose_violations(
             continue
         if CODE_LIKE.search(previous.text) or CODE_LIKE.search(current.text):
             continue
-        if HYPHEN_SPLIT.search(previous.text) or ends_sentence(previous.text):
-            continue
-        certainty = continuation_certainty(current.text, strict)
+        certainty = break_certainty(previous.text, current.text, strict)
         if certainty is None:
             continue
         violations.append(
@@ -496,32 +577,52 @@ def find_prose_violations(
     return violations
 
 
+def find_violations(
+    lines: Sequence[PhysicalLine],
+    mode: str,
+    strict: bool = False,
+    comment_families: frozenset[str] | None = None,
+    config_keys: bool = False,
+) -> list[Violation]:
+    if mode == "prose":
+        violations = find_prose_violations(lines, strict)
+    elif mode == "comments":
+        violations = find_comment_violations(lines, strict, comment_families, config_keys)
+    else:
+        raise ValueError(f"unknown mode: {mode}")
+    protected: set[int] = set()
+    for index, line in enumerate(lines):
+        if IGNORE_NEXT_LINE.search(line.body):
+            protected.update((index, index + 1))
+    return [
+        violation
+        for violation in violations
+        if violation.previous_index not in protected and violation.line_index not in protected
+    ]
+
+
 def analyze_text(
     text: str,
     mode: str,
     strict: bool = False,
     comment_families: frozenset[str] | None = None,
+    config_keys: bool = False,
 ) -> list[Violation]:
     lines = split_physical_lines(text)
-    if mode == "prose":
-        return find_prose_violations(lines, strict)
-    if mode == "comments":
-        return find_comment_violations(lines, strict, comment_families)
-    raise ValueError(f"unknown mode: {mode}")
+    return find_violations(lines, mode, strict, comment_families, config_keys)
 
 
 def apply_safe_fixes(
     text: str,
     mode: str,
     comment_families: frozenset[str] | None = None,
+    config_keys: bool = False,
 ) -> tuple[str, int]:
     fixed = 0
     while True:
         lines = split_physical_lines(text)
-        violations = (
-            find_prose_violations(lines)
-            if mode == "prose"
-            else find_comment_violations(lines, families=comment_families)
+        violations = find_violations(
+            lines, mode, comment_families=comment_families, config_keys=config_keys
         )
         safe = [violation for violation in violations if violation.certain]
         if not safe:
@@ -537,6 +638,33 @@ def apply_safe_fixes(
         fixed += len(safe)
 
 
+def shebang_interpreter(path: Path) -> str | None:
+    try:
+        with path.open("rb") as handle:
+            first_line = handle.readline(256)
+    except OSError:
+        return None
+    if not first_line.startswith(b"#!"):
+        return None
+    words = first_line[2:].decode("utf-8", "replace").split()
+    if words and Path(words[0]).name == "env":
+        words = [word for word in words[1:] if not word.startswith("-")]
+    if not words:
+        return None
+    return re.sub(r"[\d.]+$", "", Path(words[0]).name)
+
+
+def script_families(path: Path) -> set[str]:
+    if path.suffix:
+        return set()
+    interpreter = shebang_interpreter(path)
+    if interpreter in HASH_INTERPRETERS:
+        return {"#"}
+    if interpreter in SLASH_INTERPRETERS:
+        return {"//", "/*"}
+    return set()
+
+
 def comment_families_for(path: Path) -> frozenset[str] | None:
     suffix = path.suffix.lower()
     families: set[str] = set()
@@ -546,6 +674,8 @@ def comment_families_for(path: Path) -> frozenset[str] | None:
         families.add("//")
     if suffix in SLASH_BLOCK_COMMENT_SUFFIXES:
         families.add("/*")
+    if path.name.lower() not in SOURCE_NAMES:
+        families |= script_families(path)
     if suffix in DASH_COMMENT_SUFFIXES:
         families.add("-")
     if suffix in SEMICOLON_COMMENT_SUFFIXES:
@@ -566,18 +696,44 @@ def infer_mode(path: Path) -> str | None:
         return "prose"
     if suffix in SOURCE_SUFFIXES or name in SOURCE_NAMES:
         return "comments"
+    if script_families(path):
+        return "comments"
     return None
 
 
+def relative_path(path: Path) -> Path:
+    try:
+        return path.resolve().relative_to(Path.cwd().resolve())
+    except ValueError:
+        return path
+
+
 def excluded(path: Path, patterns: Sequence[str]) -> bool:
-    candidate = path.as_posix()
+    candidates = {path.as_posix(), relative_path(path).as_posix()}
     return any(
-        fnmatch.fnmatch(candidate, pattern) or fnmatch.fnmatch(path.name, pattern)
+        fnmatch.fnmatch(path.name, pattern)
+        or any(fnmatch.fnmatch(candidate, pattern) for candidate in candidates)
         for pattern in patterns
     )
 
 
-def walk_directory(directory: Path, patterns: Sequence[str]) -> Iterator[Path]:
+def excluded_by_default(path: Path) -> bool:
+    """Vendored code and license texts belong to someone else; their line breaks stay."""
+    name = path.name.lower()
+    if any(fnmatch.fnmatch(name, pattern) for pattern in DEFAULT_EXCLUDED_NAMES):
+        return True
+    directories = relative_path(path).parts[:-1]
+    return any(part.lower() in IGNORED_DIRECTORIES for part in directories)
+
+
+def generated(text: str) -> bool:
+    header = text.splitlines()[:GENERATED_HEADER_LINES]
+    return any(GENERATED_HEADER.search(line) for line in header)
+
+
+def walk_directory(
+    directory: Path, patterns: Sequence[str], default_excludes: bool = True
+) -> Iterator[Path]:
     for root, directories, filenames in os.walk(directory, followlinks=False):
         directories[:] = sorted(
             name
@@ -587,12 +743,17 @@ def walk_directory(directory: Path, patterns: Sequence[str]) -> Iterator[Path]:
         )
         for filename in sorted(filenames):
             path = Path(root) / filename
-            if not excluded(path, patterns) and infer_mode(path) is not None:
+            if excluded(path, patterns) or (default_excludes and excluded_by_default(path)):
+                continue
+            if infer_mode(path) is not None:
                 yield path
 
 
 def collect_files(
-    paths: Sequence[str], forced_mode: str, patterns: Sequence[str]
+    paths: Sequence[str],
+    forced_mode: str,
+    patterns: Sequence[str],
+    default_excludes: bool = True,
 ) -> tuple[list[tuple[Path, str]], list[str]]:
     files: list[tuple[Path, str]] = []
     errors: list[str] = []
@@ -604,7 +765,11 @@ def collect_files(
             continue
         candidates: Iterable[Path]
         if path.is_dir():
-            candidates = walk_directory(path, patterns)
+            candidates = walk_directory(path, patterns, default_excludes)
+        elif excluded(path, patterns):
+            continue
+        elif default_excludes and excluded_by_default(path):
+            continue
         else:
             candidates = [path]
         for candidate in candidates:
@@ -623,10 +788,7 @@ def collect_files(
 
 
 def display_path(path: Path) -> str:
-    try:
-        return str(path.resolve().relative_to(Path.cwd().resolve()))
-    except ValueError:
-        return str(path)
+    return str(relative_path(path))
 
 
 def read_utf8(path: Path) -> tuple[str | None, str | None]:
@@ -642,21 +804,30 @@ def read_utf8(path: Path) -> tuple[str | None, str | None]:
         return None, "not UTF-8"
 
 
-def check_file(path: Path, mode: str, fix: bool, strict: bool) -> tuple[int, int, str | None]:
+def check_file(
+    path: Path,
+    mode: str,
+    fix: bool,
+    strict: bool,
+    default_excludes: bool = True,
+) -> tuple[int, int, str | None]:
     text, error = read_utf8(path)
     if error or text is None:
         return 0, 0, error
+    if default_excludes and generated(text):
+        return 0, 0, None
     families = comment_families_for(path) if mode == "comments" else None
+    config_keys = path.suffix.lower() in YAML_SUFFIXES
     fixed = 0
     if fix:
-        updated, fixed = apply_safe_fixes(text, mode, families)
+        updated, fixed = apply_safe_fixes(text, mode, families, config_keys)
         if updated != text:
             try:
                 path.write_bytes(updated.encode("utf-8"))
             except OSError as write_error:
                 return 0, 0, str(write_error)
             text = updated
-    violations = analyze_text(text, mode, strict, families)
+    violations = analyze_text(text, mode, strict, families, config_keys)
     shown_path = display_path(path)
     for violation in violations:
         code = "SW001" if violation.certain else "SW002"
@@ -695,12 +866,20 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="GLOB",
         help="exclude a path or basename glob; repeat as needed",
     )
+    parser.add_argument(
+        "--no-default-excludes",
+        dest="default_excludes",
+        action="store_false",
+        help="also check vendored files, license texts and files marked as generated",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    files, collection_errors = collect_files(args.paths, args.mode, args.exclude)
+    files, collection_errors = collect_files(
+        args.paths, args.mode, args.exclude, args.default_excludes
+    )
     for error in collection_errors:
         print(error, file=sys.stderr)
     findings = 0
@@ -708,7 +887,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     file_errors = 0
     for path, mode in files:
         path_findings, path_fixed, error = check_file(
-            path, mode, args.fix, args.strict
+            path, mode, args.fix, args.strict, args.default_excludes
         )
         if error:
             print(f"{display_path(path)}: {error}", file=sys.stderr)
