@@ -226,7 +226,7 @@ COMMAND_OR_URL_END = re.compile(rf"(?:\w+://\S*[\w/]|:\s+{COMMAND_START}.*)$")
 IGNORE_NEXT_LINE = re.compile(r"\bsoft-wrap:\s*ignore-next-line\b")
 # DO NOT EDIT is matched in capitals only, the way generators write it, so a hand-written "Do not edit the examples" stays checked.
 GENERATED_HEADER = re.compile(
-    r"@generated\b|\bDO NOT EDIT\b|\b(?i:this file (?:is|was|has been) (?:auto-?)?generated)\b"
+    r"(?i:@generated)\b|\bDO NOT EDIT\b|\b(?i:this file (?:is|was|has been) (?:auto-?)?generated)\b"
 )
 GENERATED_HEADER_LINES = 10
 CODE_STATEMENT = re.compile(

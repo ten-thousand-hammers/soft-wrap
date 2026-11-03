@@ -24,4 +24,4 @@ python3 skills/soft-wrap/scripts/soft_wrap.py --fix README.md src/
 
 The checker scans prose files and full-line comments in common source formats, skips generated or structural layouts conservatively, and exits nonzero when a finding remains.
 Use `--strict` to surface lower-confidence continuations for manual review and `--mode prose` or `--mode comments` for an uncommon file extension.
-Vendored directories, license texts and generated files are skipped unless you pass `--no-default-excludes`, and a `soft-wrap: ignore-next-line` comment keeps the line below it apart.
+Vendored directories, license texts and generated files are skipped by default; `--no-default-excludes` checks generated files, and vendored files or license texts you name on the command line, while directory scans still skip dependency and build directories. A `soft-wrap: ignore-next-line` comment keeps the line below it apart.
