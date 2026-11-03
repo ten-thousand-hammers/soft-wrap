@@ -193,6 +193,7 @@ IGNORED_DIRECTORIES = {
 
 SENTENCE_END = re.compile(r"[.!?:](?:[)\]}'\"`*_~])*$")
 COLON_END = re.compile(r":(?:[)\]}'\"`*_~])*$")
+FULL_STOP_END = re.compile(r"[.!?](?:[)\]}'\"`*_~])*$")
 ABBREVIATION_END = re.compile(
     r"\b(?:approx|cf|Dr|e\.g|etc|i\.e|Mr|Mrs|Ms|No|resp|vs)\.$"
 )
@@ -223,9 +224,9 @@ COMMENT_LIST_ITEM = re.compile(r"^(?:[-*+]|\d+[.)])[ \t]+")
 LICENSE_BLOCK = re.compile(r"@(?:license|preserve)\b")
 COMMAND_OR_URL_END = re.compile(rf"(?:\w+://\S*[\w/]|:\s+{COMMAND_START}.*)$")
 IGNORE_NEXT_LINE = re.compile(r"\bsoft-wrap:\s*ignore-next-line\b")
+# DO NOT EDIT is matched in capitals only, the way generators write it, so a hand-written "Do not edit the examples" stays checked.
 GENERATED_HEADER = re.compile(
-    r"@generated\b|\bDO NOT EDIT\b|\bThis file (?:is|was|has been) (?:auto-?)?generated\b",
-    re.IGNORECASE,
+    r"@generated\b|\bDO NOT EDIT\b|\b(?i:this file (?:is|was|has been) (?:auto-?)?generated)\b"
 )
 GENERATED_HEADER_LINES = 10
 CODE_STATEMENT = re.compile(
@@ -381,7 +382,11 @@ def break_certainty(previous: str, current: str, strict: bool) -> bool | None:
     if HYPHEN_SPLIT.search(previous):
         return None
     certainty = continuation_certainty(current, strict)
-    if ends_sentence(previous) and not (COLON_END.search(previous) and certainty):
+    if COLON_END.search(previous):
+        # After a colon, join only a line that finishes the sentence, so an example such as "echo hello" stays on its own line; --fix repeats, so a longer continuation joins up from its last line.
+        if not (certainty and FULL_STOP_END.search(current)):
+            return None
+    elif ends_sentence(previous):
         return None
     if certainty is False and COMMAND_OR_URL_END.search(previous):
         return None
@@ -717,13 +722,28 @@ def excluded(path: Path, patterns: Sequence[str]) -> bool:
     )
 
 
+def license_name(path: Path) -> bool:
+    name = path.name.lower()
+    return any(fnmatch.fnmatch(name, pattern) for pattern in DEFAULT_EXCLUDED_NAMES)
+
+
+def project_directories(path: Path) -> tuple[str, ...]:
+    """The directories between the project root and path, so a checkout under /tmp or build/ isn't mistaken for one."""
+    relative = relative_path(path)
+    if not relative.is_absolute():
+        return relative.parts[:-1]
+    absolute = path.resolve()
+    for root in absolute.parents:
+        if (root / ".git").exists():
+            return absolute.relative_to(root).parts[:-1]
+    return ()
+
+
 def excluded_by_default(path: Path) -> bool:
     """Vendored code and license texts belong to someone else; their line breaks stay."""
-    name = path.name.lower()
-    if any(fnmatch.fnmatch(name, pattern) for pattern in DEFAULT_EXCLUDED_NAMES):
+    if license_name(path):
         return True
-    directories = relative_path(path).parts[:-1]
-    return any(part.lower() in IGNORED_DIRECTORIES for part in directories)
+    return any(part.lower() in IGNORED_DIRECTORIES for part in project_directories(path))
 
 
 def generated(text: str) -> bool:
@@ -743,7 +763,7 @@ def walk_directory(
         )
         for filename in sorted(filenames):
             path = Path(root) / filename
-            if excluded(path, patterns) or (default_excludes and excluded_by_default(path)):
+            if excluded(path, patterns) or (default_excludes and license_name(path)):
                 continue
             if infer_mode(path) is not None:
                 yield path
@@ -870,7 +890,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-default-excludes",
         dest="default_excludes",
         action="store_false",
-        help="also check vendored files, license texts and files marked as generated",
+        help=(
+            "also check files marked as generated, and vendored files and license texts "
+            "named on the command line; directory scans still skip dependency and build directories"
+        ),
     )
     return parser
 

@@ -257,6 +257,22 @@ class CommentTest(unittest.TestCase):
             corrected,
         )
 
+    def test_joins_a_longer_continuation_after_a_colon(self):
+        source = "# The limit protects the one person:\n# who keeps running\n# into limits.\n"
+
+        corrected, count = SOFT_WRAP.apply_safe_fixes(source, "comments")
+
+        self.assertEqual(2, count)
+        self.assertEqual("# The limit protects the one person: who keeps running into limits.\n", corrected)
+
+    def test_does_not_join_a_command_example_after_a_colon(self):
+        source = "# Run this:\n# echo hello\n# 1. Or this:\n#    echo goodbye\n"
+
+        corrected, count = SOFT_WRAP.apply_safe_fixes(source, "comments")
+
+        self.assertEqual(0, count)
+        self.assertEqual(source, corrected)
+
     def test_strict_mode_allows_a_capitalized_line_after_a_colon(self):
         source = "# Two steps follow:\n# Install the gems first.\n"
 
@@ -341,6 +357,7 @@ class FileCollectionTest(unittest.TestCase):
     def test_explicit_files_skip_vendored_and_license_texts_by_default(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
+            (root / ".git").mkdir()
             vendored = root / "vendor" / "lib" / "notes.md"
             vendored.parent.mkdir(parents=True)
             license_text = root / "fonts" / "Inter-OFL.txt"
@@ -357,6 +374,21 @@ class FileCollectionTest(unittest.TestCase):
             self.assertEqual([], errors)
             self.assertEqual([], files)
             self.assertEqual(len(names), len(included))
+
+    def test_ignored_directory_names_above_the_project_do_not_exclude_it(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            project = Path(temporary_directory) / "tmp" / "build" / "project"
+            project.mkdir(parents=True)
+            (project / ".git").mkdir()
+            readme = project / "README.md"
+            readme.write_text("A wrapped\nsentence.\n", encoding="utf-8")
+
+            explicit, explicit_errors = SOFT_WRAP.collect_files([str(readme)], "auto", [])
+            scanned, scan_errors = SOFT_WRAP.collect_files([str(project)], "auto", [])
+
+            self.assertEqual([], explicit_errors + scan_errors)
+            self.assertEqual([(readme, "prose")], explicit)
+            self.assertEqual([(readme, "prose")], scanned)
 
     def test_check_file_leaves_generated_files_alone(self):
         headers = [
@@ -377,6 +409,18 @@ class FileCollectionTest(unittest.TestCase):
                 self.assertEqual((0, 0, None), (findings, fixed, error))
                 self.assertEqual(header, path.read_text(encoding="utf-8"))
 
+
+    def test_check_file_still_checks_a_file_that_only_warns_against_editing(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "README.md"
+            path.write_text(
+                "Do not edit the examples below by hand.\n\nA sentence split across\ntwo lines.\n",
+                encoding="utf-8",
+            )
+
+            findings, fixed, error = SOFT_WRAP.check_file(path, "prose", False, False)
+
+            self.assertEqual((1, 0, None), (findings, fixed, error))
 
 if __name__ == "__main__":
     unittest.main()
