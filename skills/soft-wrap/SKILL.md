@@ -39,8 +39,11 @@ Use `--strict` for a final review when a continuation can begin with a proper no
 python3 <skill-dir>/scripts/soft_wrap.py --strict path/to/file another/path
 ```
 
-Pass a directory to scan supported documentation and source files recursively.
+Pass a directory to scan supported documentation and source files recursively; extensionless scripts are checked when their shebang names a known interpreter.
 Use `--mode prose` or `--mode comments` for an unsupported extension.
+`--exclude GLOB` skips matching files, including files named on the command line.
+Vendored directories, license texts and files whose header says they are generated are skipped by default; pass `--no-default-excludes` to check generated files, and vendored files or license texts you name on the command line (directory scans always skip dependency and build directories).
+For a rare line that must stay on its own, put a `soft-wrap: ignore-next-line` comment on the line above it.
 Exit status `1` means findings remain, and exit status `2` means a file could not be checked.
 
 The checker is a conservative backstop, not permission to skip the visual review.
