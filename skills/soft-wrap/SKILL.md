@@ -33,7 +33,8 @@ python3 <skill-dir>/scripts/soft_wrap.py --fix path/to/file another/path
 python3 <skill-dir>/scripts/soft_wrap.py path/to/file another/path
 ```
 
-Use `--strict` for a final review when a continuation can begin with a proper noun, number, acronym, or inline code; resolve true positives manually because strict findings are intentionally not auto-fixed.
+Use `--strict` for a final review when a continuation can begin with a proper noun, number, acronym, or inline code.
+Plain `--fix` leaves strict findings alone; review them, mark each false positive with a `soft-wrap: ignore-next-line` comment on the line above it, then run `--fix --strict` to join the rest.
 
 ```sh
 python3 <skill-dir>/scripts/soft_wrap.py --strict path/to/file another/path
@@ -42,6 +43,8 @@ python3 <skill-dir>/scripts/soft_wrap.py --strict path/to/file another/path
 Pass a directory to scan supported documentation and source files recursively; extensionless scripts are checked when their shebang names a known interpreter.
 Use `--mode prose` or `--mode comments` for an unsupported extension.
 `--exclude GLOB` skips matching files, including files named on the command line.
+A project can list globs to skip in a `.soft-wrap-ignore` file at its root (the directory with `.git`), one per line; `#` starts a comment. A pattern is matched against the path from the root and against each file or directory name, so `CHANGELOG.md` or `generated/` (a trailing `/` matches only directories) skips it at any depth.
+Use it for files a tool writes without a generated header, such as a git-cliff `CHANGELOG.md`.
 Vendored directories, license texts and files whose header says they are generated are skipped by default; pass `--no-default-excludes` to check generated files, and vendored files or license texts you name on the command line (directory scans always skip dependency and build directories).
 For a rare line that must stay on its own, put a `soft-wrap: ignore-next-line` comment on the line above it.
 Exit status `1` means findings remain, and exit status `2` means a file could not be checked.
