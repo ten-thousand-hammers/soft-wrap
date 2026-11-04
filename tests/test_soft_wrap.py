@@ -452,6 +452,44 @@ class FileCollectionTest(unittest.TestCase):
             self.assertEqual(expected, [path for path, _mode in scanned])
             self.assertEqual(sorted(expected), sorted(path for path, _mode in explicit))
 
+    def test_directory_pattern_in_ignore_file_matches_at_any_depth(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / ".git").mkdir()
+            (root / ".soft-wrap-ignore").write_text("generated/\n", encoding="utf-8")
+            nested = root / "docs" / "generated" / "v1"
+            nested.mkdir(parents=True)
+            names = [
+                root / "docs" / "generated" / "api.md",
+                nested / "api.md",
+                root / "docs" / "generated.md",
+            ]
+            for path in names:
+                path.write_text("A wrapped\nsentence.\n", encoding="utf-8")
+
+            scanned, _ = SOFT_WRAP.collect_files([str(root)], "auto", [])
+            explicit, _ = SOFT_WRAP.collect_files([str(path) for path in names], "auto", [])
+
+            expected = [root / "docs" / "generated.md"]
+            self.assertEqual(expected, [path for path, _mode in scanned])
+            self.assertEqual(expected, [path for path, _mode in explicit])
+
+    def test_ignore_file_edits_apply_to_the_next_scan(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / ".git").mkdir()
+            ignore_file = root / ".soft-wrap-ignore"
+            ignore_file.write_text("README.md\n", encoding="utf-8")
+            for name in ["README.md", "CHANGELOG.md"]:
+                (root / name).write_text("A wrapped\nsentence.\n", encoding="utf-8")
+
+            first, _ = SOFT_WRAP.collect_files([str(root)], "auto", [])
+            ignore_file.write_text("CHANGELOG.md\n", encoding="utf-8")
+            second, _ = SOFT_WRAP.collect_files([str(root)], "auto", [])
+
+            self.assertEqual([root / "CHANGELOG.md"], [path for path, _mode in first])
+            self.assertEqual([root / "README.md"], [path for path, _mode in second])
+
     def test_check_file_leaves_generated_files_alone(self):
         headers = [
             "# This file is auto-generated from the current state of the database. Instead\n"

@@ -43,7 +43,7 @@ python3 <skill-dir>/scripts/soft_wrap.py --strict path/to/file another/path
 Pass a directory to scan supported documentation and source files recursively; extensionless scripts are checked when their shebang names a known interpreter.
 Use `--mode prose` or `--mode comments` for an unsupported extension.
 `--exclude GLOB` skips matching files, including files named on the command line.
-A project can list globs to skip in a `.soft-wrap-ignore` file at its root (the directory with `.git`), one per line; `#` starts a comment and a trailing `/` skips a directory's contents.
+A project can list globs to skip in a `.soft-wrap-ignore` file at its root (the directory with `.git`), one per line; `#` starts a comment. A pattern is matched against the path from the root and against each file or directory name, so `CHANGELOG.md` or `generated/` (a trailing `/` matches only directories) skips it at any depth.
 Use it for files a tool writes without a generated header, such as a git-cliff `CHANGELOG.md`.
 Vendored directories, license texts and files whose header says they are generated are skipped by default; pass `--no-default-excludes` to check generated files, and vendored files or license texts you name on the command line (directory scans always skip dependency and build directories).
 For a rare line that must stay on its own, put a `soft-wrap: ignore-next-line` comment on the line above it.

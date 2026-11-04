@@ -756,36 +756,49 @@ def project_directories(path: Path) -> tuple[str, ...]:
     return path.resolve().relative_to(root).parts[:-1]
 
 
-@functools.lru_cache(maxsize=None)
 def ignore_file_patterns(root: Path) -> tuple[str, ...]:
-    """Globs from the project's .soft-wrap-ignore, one per line; # starts a comment and a trailing / matches a directory's contents."""
+    """Globs from the project's .soft-wrap-ignore, one per line; # starts a comment and a trailing / names a directory."""
+    ignore_file = root / IGNORE_FILE
     try:
-        lines = (root / IGNORE_FILE).read_text(encoding="utf-8").splitlines()
+        modified = ignore_file.stat().st_mtime_ns
+    except OSError:
+        return ()
+    return read_ignore_file(ignore_file, modified)
+
+
+@functools.lru_cache(maxsize=None)
+def read_ignore_file(ignore_file: Path, modified: int) -> tuple[str, ...]:
+    """Keyed on the modification time too, so an edited ignore file applies to the next scan in the same process."""
+    try:
+        lines = ignore_file.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError):
         return ()
     patterns = (line.strip() for line in lines)
-    return tuple(
-        f"{pattern}*" if pattern.endswith("/") else pattern
-        for pattern in patterns
-        if pattern and not pattern.startswith("#")
-    )
+    return tuple(pattern for pattern in patterns if pattern and not pattern.startswith("#"))
 
 
 def ignored_by_project(path: Path) -> bool:
-    """Whether the .soft-wrap-ignore at the project root (the nearest .git, else the working directory) lists path."""
+    """Whether the .soft-wrap-ignore at the project root (the nearest .git, else the working directory) lists path or a directory it is in."""
     root = project_root(path)
     if root is None:
         root = Path.cwd().resolve()
     try:
-        relative = path.resolve().relative_to(root).as_posix()
+        parts = path.resolve().relative_to(root).parts
     except ValueError:
         return False
-    if path.is_dir():
-        relative += "/"
-    return any(
-        fnmatch.fnmatch(relative, pattern) or fnmatch.fnmatch(path.name, pattern)
-        for pattern in ignore_file_patterns(root)
-    )
+    patterns = ignore_file_patterns(root)
+    for depth in range(1, len(parts) + 1):
+        relative = "/".join(parts[:depth])
+        name = parts[depth - 1]
+        directory = depth < len(parts) or path.is_dir()
+        for pattern in patterns:
+            if pattern.endswith("/"):
+                if not directory:
+                    continue
+                pattern = pattern.rstrip("/")
+            if fnmatch.fnmatch(relative, pattern) or fnmatch.fnmatch(name, pattern):
+                return True
+    return False
 
 
 def excluded_by_default(path: Path) -> bool:
